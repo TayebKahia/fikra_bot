@@ -127,7 +127,7 @@ async def handle_email(update: Update, context: CallbackContext):
         )
 
         # Wait for 10 seconds
-        await asyncio.sleep(10)
+        await asyncio.sleep(13)
 
         # Fetch the latest OTP code
         email_pass = EMAIL_CREDENTIALS[provided_email]

@@ -7,6 +7,7 @@ from telegram.ext import Application, CommandHandler, CallbackContext, MessageHa
 import os
 import logging
 import json
+import asyncio
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -59,19 +60,22 @@ def fetch_latest_otp(email_user, email_pass):
                                 if payload:
                                     if content_type == "text/plain":
                                         email_body = payload.decode()
-                                    elif content_type == "text/html":
-                                        email_body = payload.decode()  # Optionally parse HTML
+                                    elif content_type == "text/html" and not email_body:  # Fallback to HTML
+                                        email_body = payload.decode()
                     else:
                         payload = msg.get_payload(decode=True)
                         if payload:
                             email_body = payload.decode()
+
                     if email_body:
+                        logging.info(f"Email body fetched: {email_body}")
                         email_body = re.sub(r'<[^>]+>', '', email_body).strip()
 
                     # Search for a 6-digit OTP code in the email body
                     otp_match = re.search(r'\b\d{6}\b', email_body)
                     if otp_match:
                         otp_code = otp_match.group(0)
+                        logging.info(f"OTP code found: {otp_code}")
 
                         # Get the email sent time
                         date_header = msg.get('Date')
@@ -83,6 +87,7 @@ def fetch_latest_otp(email_user, email_pass):
                         return otp_code, email_time
 
         mail.logout()
+        logging.info("No OTP code found in any emails.")
         return None, None
     except Exception as e:
         logging.error(f"Error fetching OTP: {str(e)}")
@@ -118,8 +123,11 @@ async def handle_email(update: Update, context: CallbackContext):
     if provided_email in EMAIL_CREDENTIALS:
         user_email[user_id] = provided_email
         await update.message.reply_text(
-            f"Email '{provided_email}' recognized. Fetching your latest OTP code..."
+            f"Email '{provided_email}' recognized. Please wait for 10 seconds while we fetch your latest OTP code..."
         )
+
+        # Wait for 10 seconds
+        await asyncio.sleep(10)
 
         # Fetch the latest OTP code
         email_pass = EMAIL_CREDENTIALS[provided_email]

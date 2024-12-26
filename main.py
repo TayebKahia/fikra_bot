@@ -123,11 +123,11 @@ async def handle_email(update: Update, context: CallbackContext):
     if provided_email in EMAIL_CREDENTIALS:
         user_email[user_id] = provided_email
         await update.message.reply_text(
-            f"Email '{provided_email}' recognized. \n Please wait for 5 seconds while we fetch your latest OTP code..."
+            f"Email '{provided_email}' recognized. \n Please wait for few seconds while we fetch your latest OTP code..."
         )
 
         # Wait for 10 seconds
-        await asyncio.sleep(5)
+        await asyncio.sleep(8)
 
         # Fetch the latest OTP code
         email_pass = EMAIL_CREDENTIALS[provided_email]

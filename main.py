@@ -1,166 +1,140 @@
-import re
-import imaplib
-import email
-from email.utils import parsedate_to_datetime
-from telegram import Update
-from telegram.ext import Application, CommandHandler, CallbackContext, MessageHandler, filters
+from flask import Flask, request
+from telegram import Update, Bot
+from telegram.ext import Dispatcher, CommandHandler, MessageHandler, filters, ConversationHandler
+import pyotp
 import os
-import logging
-import json
-import asyncio
+import re
+import time
 from dotenv import load_dotenv
+from datetime import datetime
+import logging
 
+# Load environment variables
 load_dotenv()
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-EMAIL_CREDENTIALS = json.loads(os.getenv("EMAIL_CREDENTIALS", "{}")) 
-if not TELEGRAM_BOT_TOKEN or not EMAIL_CREDENTIALS:
-    raise ValueError("Missing TELEGRAM_BOT_TOKEN or EMAIL_CREDENTIALS in environment variables.")
+# Telegram bot token and secret keys
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+SECRET_KEY_PAIRS = os.getenv("SECRET_KEY_PAIRS", "")
 
-print("Environment variables loaded successfully!")
+# Parse secret keys
+SECRET_KEYS = {
+    pair.split(":")[0]: pair.split(":")[1]
+    for pair in SECRET_KEY_PAIRS.split(",")
+    if ":" in pair
+}
+
+# Flask app setup
+app = Flask(__name__)
+bot = Bot(token=BOT_TOKEN)
+dispatcher = Dispatcher(bot, None, workers=4, use_context=True)
+
+# Logging setup
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
+    format="%(asctime)s - %(message)s",
 )
+logger = logging.getLogger(__name__)
 
-# Global dictionary to store user-provided email temporarily
-user_email = {}
+# Define conversation states
+EMAIL = range(1)
 
-def fetch_latest_otp(email_user, email_pass):
-    try:
-        # Connect to the email server
-        if "gmail.com" in email_user:
-            mail = imaplib.IMAP4_SSL("imap.gmail.com")
-        elif "outlook.com" in email_user or "hotmail.com" in email_user:
-            mail = imaplib.IMAP4_SSL("imap-mail.outlook.com")
-        else:
-            raise ValueError("Unsupported email provider.")
-        mail.login(email_user, email_pass)
-        mail.select('inbox')
 
-        # Search for all emails
-        status, messages = mail.search(None, 'ALL')
-        email_ids = messages[0].split()
+# Validate email format and domain
+def is_valid_email(email):
+    pattern = r"^[a-zA-Z0-9._%+-]+@(gmail\.com|outlook\.com)$"
+    return re.match(pattern, email)
 
-        # Process emails from latest to oldest
-        for email_id in reversed(email_ids):
-            status, msg_data = mail.fetch(email_id, '(RFC822)')
-            for response_part in msg_data:
-                if isinstance(response_part, tuple):
-                    msg = email.message_from_bytes(response_part[1])
 
-                    # Retrieve the email body
-                    email_body = ""
-                    if msg.is_multipart():
-                        for part in msg.walk():
-                            content_type = part.get_content_type()
-                            content_disposition = str(part.get('Content-Disposition'))
-                            if 'attachment' not in content_disposition:
-                                payload = part.get_payload(decode=True)
-                                if payload:
-                                    if content_type == "text/plain":
-                                        email_body = payload.decode()
-                                    elif content_type == "text/html" and not email_body:  # Fallback to HTML
-                                        email_body = payload.decode()
-                    else:
-                        payload = msg.get_payload(decode=True)
-                        if payload:
-                            email_body = payload.decode()
+# Function to generate OTP and time remaining
+def generate_otp_with_time(secret_key):
+    totp = pyotp.TOTP(secret_key)
+    otp = totp.now()
+    time_remaining = totp.interval - (int(time.time()) % totp.interval)
+    return otp, time_remaining
 
-                    if email_body:
-                        logging.info(f"Email body fetched: {email_body}")
-                        email_body = re.sub(r'<[^>]+>', '', email_body).strip()
 
-                    # Search for a 6-digit OTP code in the email body
-                    otp_match = re.search(r'\b\d{6}\b', email_body)
-                    if otp_match:
-                        otp_code = otp_match.group(0)
-                        logging.info(f"OTP code found: {otp_code}")
+# Start the /getotp process
+def getotp_start(update: Update, context):
+    logger.info(f"User {update.effective_user.id} started the /getotp process.")
+    update.message.reply_text(
+        "يرجى إدخال بريدك الإلكتروني (Gmail أو Outlook) للحصول على كلمة المرور لمرة واحدة.\n"
+        "يمكنك كتابة /cancel لإلغاء العملية."
+    )
+    return EMAIL
 
-                        # Get the email sent time
-                        date_header = msg.get('Date')
-                        email_time = None
-                        if date_header:
-                            email_time = parsedate_to_datetime(date_header)
 
-                        mail.logout()
-                        return otp_code, email_time
+# Process the email input
+def process_email(update: Update, context):
+    email = update.message.text.lower().strip()
+    received_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    logger.info(f"Received email: {email} at {received_time}")
 
-        mail.logout()
-        logging.info("No OTP code found in any emails.")
-        return None, None
-    except Exception as e:
-        logging.error(f"Error fetching OTP: {str(e)}")
-        return None, None
+    if not is_valid_email(email):
+        update.message.reply_text("❌ بريد إلكتروني غير صالح!")
+        return EMAIL
 
-async def start_command(update: Update, context: CallbackContext):
-    await update.message.reply_text("Welcome! I'm your bot. Use /help to see available commands.")
+    secret_key = SECRET_KEYS.get(email)
+    if not secret_key:
+        update.message.reply_text("❌ البريد الإلكتروني غير مسجل.")
+        return EMAIL
 
-# Help command
-async def help_command(update: Update, context: CallbackContext):
-    commands = """
-Here are the available commands:
-/start - Start the bot
-/help - Show this help message
-/status - Get the bot status
-/fetch - Fetch the latest OTP code (you'll need to provide your email)
-    """
-    await update.message.reply_text(commands)
-
-# Status command
-async def status_command(update: Update, context: CallbackContext):
-    await update.message.reply_text("The bot is running and ready to assist you!")
-
-# Fetch command
-async def fetch_command(update: Update, context: CallbackContext):
-    await update.message.reply_text("Please provide your email address to fetch the latest OTP code.")
-
-async def handle_email(update: Update, context: CallbackContext):
-    user_id = update.message.chat_id
-    provided_email = update.message.text.strip()
-
-    # Check if the email is in predefined credentials
-    if provided_email in EMAIL_CREDENTIALS:
-        user_email[user_id] = provided_email
-        await update.message.reply_text(
-            f"Email '{provided_email}' recognized. \n Please wait for few seconds while we fetch your latest OTP code..."
+    otp, time_remaining = generate_otp_with_time(secret_key)
+    if time_remaining < 5:
+        update.message.reply_text(
+            f"⚠️ كلمة المرور الحالية ستنتهي خلال {time_remaining} ثانية.\n"
+            "انتظر قليلاً حتى يتم توليد كلمة مرور جديدة."
         )
-
-        # Wait for 10 seconds
-        await asyncio.sleep(13)
-
-        # Fetch the latest OTP code
-        email_pass = EMAIL_CREDENTIALS[provided_email]
-        otp_code, email_time = fetch_latest_otp(provided_email, email_pass)
-
-        if otp_code:
-            if email_time:
-                await update.message.reply_text(
-                    f"{otp_code}\n\nReceived on: {email_time.strftime('%Y-%m-%d %H:%M:%S')}"
-                )
-            else:
-                await update.message.reply_text(f"OTP code is: {otp_code}")
-        else:
-            await update.message.reply_text("No OTP code found in your recent emails.")
     else:
-        await update.message.reply_text(
-            "Sorry, the provided email address is not recognized. Please try again with a valid email."
+        update.message.reply_text(
+            f"✅ كلمة المرور: {otp}\n"
+            f"⏳ الوقت المتبقي لانتهاء الصلاحية: {time_remaining} ثانية"
         )
 
-def main():
-    token = os.getenv("TELEGRAM_BOT_TOKEN", TELEGRAM_BOT_TOKEN)
-    # Create the bot application
-    application = Application.builder().token(token).build()
+    return EMAIL
 
-    # Add command handlers
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_email))
-    application.add_handler(CommandHandler('start', start_command))
-    application.add_handler(CommandHandler('help', help_command))
-    application.add_handler(CommandHandler('status', status_command))
-    application.add_handler(CommandHandler('fetch', fetch_command))
 
-    # Run the bot
-    application.run_polling()
+# Cancel the process
+def cancel(update: Update, context):
+    logger.info(f"User {update.effective_user.id} cancelled the operation.")
+    update.message.reply_text("❌ تم إلغاء العملية. شكراً لاستخدامك البوت!")
+    return ConversationHandler.END
 
-if __name__ == '__main__':
-    main()
+
+# Set up Telegram bot handlers
+def setup_dispatcher(dp):
+    conversation_handler = ConversationHandler(
+        entry_points=[CommandHandler("getotp", getotp_start)],
+        states={
+            EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_email)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+    dp.add_handler(CommandHandler("start", lambda update, context: update.message.reply_text(
+        "مرحبًا بك في بوت OTP! استخدم /getotp للحصول على كلمة المرور لمرة واحدة."
+    )))
+    dp.add_handler(conversation_handler)
+    return dp
+
+
+dispatcher = setup_dispatcher(dispatcher)
+
+
+# Webhook route
+@app.route(f"/{BOT_TOKEN}", methods=["POST"])
+def webhook():
+    if request.method == "POST":
+        update = Update.de_json(request.get_json(force=True), bot)
+        dispatcher.process_update(update)
+        return "OK", 200
+
+
+# Set a route for debugging
+@app.route("/", methods=["GET"])
+def index():
+    return "Bot is running!", 200
+
+
+if __name__ == "__main__":
+    logger.info("Starting bot...")
+    # Flask app runs on port 5000
+    app.run(host="0.0.0.0", port=5000)

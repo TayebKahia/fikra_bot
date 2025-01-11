@@ -2,3 +2,4 @@ Flask==2.2.3
 python-telegram-bot==20.3
 python-dotenv==1.0.0
 pyotp==2.8.0
+gunicorn==20.1.0

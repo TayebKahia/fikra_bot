@@ -133,8 +133,23 @@ def webhook():
 def index():
     return "Bot is running!", 200
 
+import requests
 
+# Set the webhook automatically when the app starts
+WEBHOOK_URL = f"https://<your-app-name>.onrender.com/{BOT_TOKEN}"
+
+def set_webhook():
+    response = requests.post(
+        f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
+        json={"url": WEBHOOK_URL},
+    )
+    if response.status_code == 200:
+        logger.info("Webhook set successfully!")
+    else:
+        logger.error(f"Failed to set webhook: {response.text}")
+
+# Call set_webhook in your __main__ section
 if __name__ == "__main__":
+    set_webhook()
     logger.info("Starting bot...")
-    # Flask app runs on port 5000
     app.run(host="0.0.0.0", port=5000)
